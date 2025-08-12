@@ -114,57 +114,111 @@ class EtchDataProcessor:
 # --- datasets ------------------------------------------------------------
 class EtchDataset(Dataset):
     def __init__(self, sequences: Sequence, profiles: np.ndarray):
+        # keep raw sequences for compatibility
         self.sequences = list(sequences)
         self.profiles = profiles
+        self.param_dim = len(self.sequences[0][0][1]) if self.sequences and self.sequences[0] else 1
+
+        def _prep(seq: List[Tuple[int, np.ndarray]]) -> Dict[str, np.ndarray]:
+            L = len(seq)
+            step_seq = np.array([s for s, _ in seq], dtype=np.int64) if L else np.zeros(0, dtype=np.int64)
+            pos_seq = np.arange(L, dtype=np.int64) if L else np.zeros(0, dtype=np.int64)
+            if L:
+                param_seq = np.stack([v for _, v in seq]).astype(np.float32)
+                param_mask = (param_seq != 0).astype(np.bool_)
+            else:
+                param_seq = np.zeros((0, self.param_dim), dtype=np.float32)
+                param_mask = np.zeros((0, self.param_dim), dtype=np.bool_)
+            mask = np.ones(L, dtype=np.bool_)
+            return {
+                "step_seq": step_seq,
+                "pos_seq": pos_seq,
+                "param_seq": param_seq,
+                "param_mask": param_mask,
+                "mask": mask,
+            }
+
+        self._seq_data = [_prep(seq) for seq in self.sequences]
 
     def __len__(self) -> int:
-        return len(self.sequences)
+        return len(self._seq_data)
 
     def __getitem__(self, idx: int):
-        return self.sequences[idx], self.profiles[idx]
+        return self._seq_data[idx], self.profiles[idx]
 
 
 class SingleEtchDataset(Dataset):
     def __init__(self, seq: List[Tuple[int, np.ndarray]], profile: np.ndarray):
-        self.seq = seq
+        param_dim = len(seq[0][1]) if seq else 1
+        L = len(seq)
+        step_seq = np.array([s for s, _ in seq], dtype=np.int64) if L else np.zeros(0, dtype=np.int64)
+        pos_seq = np.arange(L, dtype=np.int64) if L else np.zeros(0, dtype=np.int64)
+        if L:
+            param_seq = np.stack([v for _, v in seq]).astype(np.float32)
+            param_mask = (param_seq != 0).astype(np.bool_)
+        else:
+            param_seq = np.zeros((0, param_dim), dtype=np.float32)
+            param_mask = np.zeros((0, param_dim), dtype=np.bool_)
+        mask = np.ones(L, dtype=np.bool_)
+        self.sample = {
+            "step_seq": step_seq,
+            "pos_seq": pos_seq,
+            "param_seq": param_seq,
+            "param_mask": param_mask,
+            "mask": mask,
+        }
         self.profile = profile
 
     def __len__(self):
         return 1
 
     def __getitem__(self, idx):
-        return self.seq, self.profile
+        return self.sample, self.profile
 
 
 # --- collate functions ---------------------------------------------------
 def collate_fn(batch: List[Any]):
     sequences, profiles = zip(*batch)
     batch_size = len(sequences)
-    max_len = max(len(s) for s in sequences) or 1
-    param_dim = len(sequences[0][0][1]) if sequences[0] else 1
+    max_len = max(s["step_seq"].shape[0] for s in sequences) or 1
+    param_dim = sequences[0]["param_seq"].shape[1] if sequences[0]["param_seq"].size else 1
     step_seq = torch.zeros((batch_size, max_len), dtype=torch.long)
+    pos_seq = torch.zeros((batch_size, max_len), dtype=torch.long)
     param_seq = torch.zeros((batch_size, max_len, param_dim), dtype=torch.float32)
+    param_mask = torch.zeros((batch_size, max_len, param_dim), dtype=torch.bool)
     mask = torch.zeros((batch_size, max_len), dtype=torch.bool)
     for i, seq in enumerate(sequences):
-        for j, (step, vec) in enumerate(seq):
-            step_seq[i, j] = step
-            param_seq[i, j] = torch.from_numpy(vec)
-            mask[i, j] = True
+        L = seq["step_seq"].shape[0]
+        step_seq[i, :L] = torch.from_numpy(seq["step_seq"])
+        pos_seq[i, :L] = torch.from_numpy(seq["pos_seq"])
+        param_seq[i, :L] = torch.from_numpy(seq["param_seq"])
+        param_mask[i, :L] = torch.from_numpy(seq["param_mask"])
+        mask[i, :L] = torch.from_numpy(seq["mask"])
     profiles_t = torch.tensor(np.stack(profiles), dtype=torch.float32)
-    return {"step_seq": step_seq, "param_seq": param_seq, "mask": mask, "profile": profiles_t}
+    return {
+        "step_seq": step_seq,
+        "pos_seq": pos_seq,
+        "param_seq": param_seq,
+        "param_mask": param_mask,
+        "mask": mask,
+        "profile": profiles_t,
+    }
 
 
 def collate_fn_single(batch: List[Any]):
     seq, profile = batch[0]
-    L = max(len(seq), 1)
-    param_dim = len(seq[0][1]) if seq else 1
-    step_seq = torch.zeros((L,), dtype=torch.long)
-    param_seq = torch.zeros((L, param_dim), dtype=torch.float32)
-    mask = torch.zeros((L,), dtype=torch.bool)
-    for i, (step, vec) in enumerate(seq):
-        step_seq[i] = step
-        param_seq[i] = torch.from_numpy(vec)
-        mask[i] = True
+    step_t = torch.from_numpy(seq["step_seq"]).unsqueeze(0).long()
+    pos_t = torch.from_numpy(seq["pos_seq"]).unsqueeze(0).long()
+    param_t = torch.from_numpy(seq["param_seq"]).unsqueeze(0).float()
+    param_mask_t = torch.from_numpy(seq["param_mask"]).unsqueeze(0).bool()
+    mask_t = torch.from_numpy(seq["mask"]).unsqueeze(0).bool()
     profile_t = torch.tensor(profile, dtype=torch.float32).unsqueeze(0)
-    return {"step_seq": step_seq.unsqueeze(0), "param_seq": param_seq.unsqueeze(0), "mask": mask.unsqueeze(0), "profile": profile_t}
+    return {
+        "step_seq": step_t,
+        "pos_seq": pos_t,
+        "param_seq": param_t,
+        "param_mask": param_mask_t,
+        "mask": mask_t,
+        "profile": profile_t,
+    }
 
