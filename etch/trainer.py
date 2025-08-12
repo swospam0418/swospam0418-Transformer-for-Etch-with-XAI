@@ -36,8 +36,10 @@ class ModelTrainer:
             for batch in train_loader:
                 optimizer.zero_grad()
                 out = self.model(batch["step_seq"].to(self.device),
+                                 batch["pos_seq"].to(self.device),
                                  batch["param_seq"].to(self.device),
-                                 batch["mask"].to(self.device))
+                                 batch["mask"].to(self.device),
+                                 batch["param_mask"].to(self.device))
                 tgt = batch["profile"].to(self.device)
                 loss = criterion(out, tgt)
                 loss.backward()
@@ -54,8 +56,10 @@ class ModelTrainer:
             with torch.no_grad():
                 for batch in val_loader:
                     out = self.model(batch["step_seq"].to(self.device),
+                                     batch["pos_seq"].to(self.device),
                                      batch["param_seq"].to(self.device),
-                                     batch["mask"].to(self.device))
+                                     batch["mask"].to(self.device),
+                                     batch["param_mask"].to(self.device))
                     tgt = batch["profile"].to(self.device)
                     loss = criterion(out, tgt)
                     val_loss += loss.item()

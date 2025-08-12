@@ -33,12 +33,12 @@ class ForwardPredictor:
                 t[idx] = (v - mean) / std
         return t
 
-    def evaluate_recipe(self, seq: Sequence[Tuple[int, np.ndarray]], target: np.ndarray) -> float:
+    def evaluate_recipe(self, seq: Sequence[Tuple[int, Sequence[Tuple[int, float]]]], target: np.ndarray) -> float:
         pred = single_recipe_predict(self.model, list(seq), self.processor, self.device)
         return float(np.mean((pred - target) ** 2))
 
     # --- simple random search ---------------------------------------
-    def random_search(self, target: np.ndarray, n_iter: int = 200) -> Tuple[List[Tuple[int, np.ndarray]], float]:
+    def random_search(self, target: np.ndarray, n_iter: int = 200) -> Tuple[List[Tuple[int, Sequence[Tuple[int, float]]]], float]:
         best_seq, best_err = None, float('inf')
         for _ in range(n_iter):
             seq = deepcopy(random.choice(self.seqs))
@@ -47,17 +47,16 @@ class ForwardPredictor:
                 best_seq, best_err = seq, err
         return best_seq, best_err
 
-    def format_recipe(self, seq: Sequence[Tuple[int, np.ndarray]]) -> List[Dict]:
+    def format_recipe(self, seq: Sequence[Tuple[int, Sequence[Tuple[int, float]]]]) -> List[Dict]:
         out = []
-        for step_idx, (stype, vec) in enumerate(seq):
+        for step_idx, (stype, params) in enumerate(seq):
             step_name = [k for k, v in self.processor.step_types.items() if v == stype]
             step_name = step_name[0] if step_name else str(stype)
-            params = {}
-            for i, val in enumerate(vec):
-                if abs(val) > 1e-3:
-                    name = self.processor.all_tuning_cols[i]
-                    mean, std = self.processor.x_col_stats[name]
-                    params[name] = val * std + mean
-            out.append({"step": step_idx + 1, "step_type": step_name, "parameters": params})
+            params_dict: Dict[str, float] = {}
+            for pos, val in params:
+                name = self.processor.all_tuning_cols[pos]
+                mean, std = self.processor.x_col_stats[name]
+                params_dict[name] = val * std + mean
+            out.append({"step": step_idx + 1, "step_type": step_name, "parameters": params_dict})
         return out
 

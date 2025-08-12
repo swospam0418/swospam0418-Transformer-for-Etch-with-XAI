@@ -31,18 +31,36 @@ class SensitivityAnalyzer:
             seq = seqs[idx]
             if not seq:
                 continue
-            step_idx = np.array([s[0] for s in seq], dtype=np.int64)
-            param = np.stack([s[1] for s in seq]).astype(np.float32)
-            step_t = torch.from_numpy(step_idx).unsqueeze(0).to(self.device)
-            param_t = torch.from_numpy(param).unsqueeze(0).to(self.device)
+            L = len(seq)
+            P = max((len(s[1]) for s in seq), default=1)
+            step_arr = np.zeros((L,), dtype=np.int64)
+            pos_arr = np.zeros((L, P), dtype=np.int64)
+            param_arr = np.zeros((L, P), dtype=np.float32)
+            p_mask = np.zeros((L, P), dtype=bool)
+            for i, (step, params) in enumerate(seq):
+                step_arr[i] = step
+                for j, (pos, val) in enumerate(params):
+                    pos_arr[i, j] = pos
+                    param_arr[i, j] = val
+                    p_mask[i, j] = True
+            step_t = torch.from_numpy(step_arr).unsqueeze(0).to(self.device)
+            pos_t = torch.from_numpy(pos_arr).unsqueeze(0).to(self.device)
+            param_t = torch.from_numpy(param_arr).unsqueeze(0).to(self.device)
             param_t.requires_grad_(True)
-            mask = torch.ones((1, len(seq)), dtype=torch.bool, device=self.device)
-            out = self.model(step_t, param_t, mask)
+            mask_t = torch.ones((1, L), dtype=torch.bool, device=self.device)
+            p_mask_t = torch.from_numpy(p_mask).unsqueeze(0).to(self.device)
+            out = self.model(step_t, pos_t, param_t, mask_t, p_mask_t)
             loss = out.norm()
             loss.backward()
-            grad = param_t.grad.abs().sum(dim=1).cpu().numpy()
-            for j in range(min(len(grad), len(x_cols))):
-                mat[j] += grad[j]
+            grad_tensor = param_t.grad.abs()[0].cpu().numpy()
+            pos_np = pos_arr
+            mask_np = p_mask
+            grad_vec = np.zeros(len(x_cols))
+            for i in range(L):
+                for j in range(P):
+                    if mask_np[i, j]:
+                        grad_vec[pos_np[i, j]] += grad_tensor[i, j]
+            mat += grad_vec[:, None]
         if len(sample_indices) > 0:
             mat /= len(sample_indices)
         df = pd.DataFrame(mat, index=x_cols, columns=y_cols)
