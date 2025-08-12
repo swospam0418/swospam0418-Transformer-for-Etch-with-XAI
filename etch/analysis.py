@@ -1,10 +1,10 @@
 from __future__ import annotations
+
 import numpy as np
 import matplotlib.pyplot as plt
+import torch
 from torch.utils.data import DataLoader
 from sklearn.metrics import r2_score
-
-from .data_processing import SingleEtchDataset, collate_fn_single
 
 
 def single_recipe_predict(model, seq, processor, device):
