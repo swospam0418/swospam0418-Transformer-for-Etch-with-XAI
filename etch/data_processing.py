@@ -4,6 +4,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 from typing import List, Dict, Tuple, Sequence, Any
+import re
 
 
 def read_merge_sheets(file_path: str) -> pd.DataFrame:
@@ -21,12 +22,15 @@ class EtchDataProcessor:
 
     def __init__(self) -> None:
         self.step_types: Dict[str, int] = {}
-        self.tuning_knobs: Dict[str, List[str]] = {}
+        self.tuning_cols: Dict[str, Dict[int, List[str]]] = {}
         self.step_param_indices: Dict[str, List[int]] = {}
+        self.step_position_param_indices: Dict[str, Dict[int, List[int]]] = {}
+        self.step_param_masks: Dict[str, Dict[int, np.ndarray]] = {}
         self.all_tuning_cols: List[str] = []
         self.all_profile_cols: List[str] = []
         self.x_col_stats: Dict[str, Tuple[float, float]] = {}
         self.y_col_stats: Dict[str, Tuple[float, float]] = {}
+        self.global_param_dim: int = 0
 
     # --- registration -----------------------------------------------------
     def parse_columns(self, df: pd.DataFrame) -> None:
@@ -34,13 +38,15 @@ class EtchDataProcessor:
         for col in df.columns:
             if col.startswith("X"):
                 parts = col.split("_")
-                step_type = parts[1] if len(parts) > 1 else "UNKNOWN"
-                knob = "".join(parts[2:]) if len(parts) > 2 else "default"
+                step_raw = parts[1] if len(parts) > 1 else "UNKNOWN"
+                step_type, position = self.parse_architecture_step_number(step_raw)
                 if step_type not in self.step_types:
                     self.step_types[step_type] = len(self.step_types)
-                    self.tuning_knobs[step_type] = []
-                if knob not in self.tuning_knobs[step_type]:
-                    self.tuning_knobs[step_type].append(knob)
+                    self.tuning_cols[step_type] = {}
+                if position not in self.tuning_cols[step_type]:
+                    self.tuning_cols[step_type][position] = []
+                if col not in self.tuning_cols[step_type][position]:
+                    self.tuning_cols[step_type][position].append(col)
                 if col not in self.all_tuning_cols:
                     self.all_tuning_cols.append(col)
             elif col.startswith("Y") and col not in self.all_profile_cols:
@@ -48,13 +54,19 @@ class EtchDataProcessor:
 
     def build_indices(self) -> None:
         col_idx_map = {c: i for i, c in enumerate(self.all_tuning_cols)}
-        for st, knobs in self.tuning_knobs.items():
-            idxs: List[int] = []
-            for knob in knobs:
-                col_name = f"X{st}_{knob}" if knob != "default" else f"X{st}"
-                if col_name in col_idx_map:
-                    idxs.append(col_idx_map[col_name])
-            self.step_param_indices[st] = idxs
+        self.global_param_dim = len(self.all_tuning_cols)
+        for st, pos_cols in self.tuning_cols.items():
+            union_idxs: List[int] = []
+            self.step_position_param_indices[st] = {}
+            self.step_param_masks[st] = {}
+            for pos, cols in pos_cols.items():
+                idxs = [col_idx_map[c] for c in cols if c in col_idx_map]
+                self.step_position_param_indices[st][pos] = idxs
+                mask = np.zeros(self.global_param_dim, dtype=bool)
+                mask[idxs] = True
+                self.step_param_masks[st][pos] = mask
+                union_idxs.extend(idxs)
+            self.step_param_indices[st] = sorted(set(union_idxs))
 
     # --- statistics -------------------------------------------------------
     def fit_statistics(self, df: pd.DataFrame) -> None:
@@ -100,6 +112,42 @@ class EtchDataProcessor:
                 param_vec[idxs] = row[idxs]
                 if np.any(param_vec):
                     recipe_seq.append((st_idx, param_vec))
+            sequences.append(recipe_seq)
+        return sequences, profiles
+
+    def parse_step_order(self, step_identifier: str) -> int:
+        """Extract step order from an identifier."""
+        m = re.search(r"(\d+)$", step_identifier)
+        return int(m.group(1)) if m else 0
+
+    def parse_architecture_step_number(self, step_identifier: str) -> Tuple[str, int]:
+        """Split identifier into base step name and position."""
+        m = re.match(r"([A-Za-z]+)(\d+)$", step_identifier)
+        if m:
+            return m.group(1), int(m.group(2))
+        return step_identifier, 0
+
+    def build_sequences_and_profiles_v2(
+        self, df: pd.DataFrame
+    ) -> Tuple[List[List[Tuple[int, np.ndarray, int, np.ndarray]]], np.ndarray]:
+        """Return sequences of (step_type, params, position, param_mask)."""
+        profiles = df[self.all_profile_cols].values
+        X_matrix = df[self.all_tuning_cols].values
+        sequences: List[List[Tuple[int, np.ndarray, int, np.ndarray]]] = []
+        for row in X_matrix:
+            recipe_seq: List[Tuple[int, np.ndarray, int, np.ndarray]] = []
+            for st, st_idx in self.step_types.items():
+                pos_map = self.step_position_param_indices.get(st, {})
+                mask_map = self.step_param_masks.get(st, {})
+                for pos, idxs in pos_map.items():
+                    if not idxs:
+                        continue
+                    values = row[idxs]
+                    if np.any(values):
+                        param_vec = np.zeros(self.global_param_dim, dtype=float)
+                        param_vec[idxs] = values
+                        mask = mask_map[pos].copy()
+                        recipe_seq.append((st_idx, param_vec, pos, mask))
             sequences.append(recipe_seq)
         return sequences, profiles
 
