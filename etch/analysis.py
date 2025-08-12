@@ -10,14 +10,26 @@ from sklearn.metrics import r2_score
 def single_recipe_predict(model, seq, processor, device):
     if not seq:
         return np.zeros(len(processor.all_profile_cols), dtype=float)
-    step_seq = np.array([s[0] for s in seq], dtype=np.int64)
-    param_seq = np.stack([s[1] for s in seq]).astype(np.float32)
-    step_t = torch.from_numpy(step_seq).unsqueeze(0).to(device)
-    param_t = torch.from_numpy(param_seq).unsqueeze(0).to(device)
-    mask = torch.ones((1, len(seq)), dtype=torch.bool, device=device)
+    L = len(seq)
+    P = max((len(s[1]) for s in seq), default=1)
+    step_arr = np.zeros((L,), dtype=np.int64)
+    pos_arr = np.zeros((L, P), dtype=np.int64)
+    param_arr = np.zeros((L, P), dtype=np.float32)
+    param_mask = np.zeros((L, P), dtype=bool)
+    for i, (step, params) in enumerate(seq):
+        step_arr[i] = step
+        for j, (pos, val) in enumerate(params):
+            pos_arr[i, j] = pos
+            param_arr[i, j] = val
+            param_mask[i, j] = True
+    step_t = torch.from_numpy(step_arr).unsqueeze(0).to(device)
+    pos_t = torch.from_numpy(pos_arr).unsqueeze(0).to(device)
+    param_t = torch.from_numpy(param_arr).unsqueeze(0).to(device)
+    mask_t = torch.ones((1, L), dtype=torch.bool, device=device)
+    p_mask_t = torch.from_numpy(param_mask).unsqueeze(0).to(device)
     model.eval()
     with torch.no_grad():
-        out = model(step_t, param_t, mask)
+        out = model(step_t, pos_t, param_t, mask_t, p_mask_t)
     return out.squeeze(0).cpu().numpy()
 
 
@@ -26,7 +38,11 @@ def evaluate_predictions(model, loader: DataLoader, processor, device: str, max_
     preds, acts = [], []
     with torch.no_grad():
         for batch in loader:
-            out = model(batch["step_seq"].to(device), batch["param_seq"].to(device), batch["mask"].to(device))
+            out = model(batch["step_seq"].to(device),
+                       batch["pos_seq"].to(device),
+                       batch["param_seq"].to(device),
+                       batch["mask"].to(device),
+                       batch["param_mask"].to(device))
             preds.append(out.cpu().numpy())
             acts.append(batch["profile"].cpu().numpy())
     preds = np.concatenate(preds)
